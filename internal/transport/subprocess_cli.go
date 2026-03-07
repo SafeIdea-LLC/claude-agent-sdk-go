@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,7 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 
 	// Log the full command for debugging
 	t.logger.Debug("Claude CLI command: %s %v", t.cliPath, args)
+	stdlog.Printf("[sdk-transport] CLI args: %v", args)
 
 	// Create command with arguments
 	t.cmd = exec.CommandContext(t.ctx, t.cliPath, args...)
@@ -446,6 +448,32 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 			} else {
 				args = append(args, "--subagent-execution", string(subagentJSONBytes))
 				t.logger.Debug("Subagent execution configuration: %s", string(subagentJSONBytes))
+			}
+		}
+	}
+
+	// Add MCP server configuration.
+	// SDK MCP servers (in-process) are declared to the CLI via --mcp-config
+	// with type "sdk". The CLI routes tool calls back through the control
+	// protocol as mcp_message requests, handled by the Query handler.
+	if t.options != nil && t.options.McpServers != nil {
+		if servers, ok := t.options.McpServers.(map[string]interface{}); ok {
+			mcpConfig := make(map[string]interface{})
+			for name, srv := range servers {
+				if _, isMCP := srv.(types.MCPServer); isMCP {
+					// SDK-managed server: tell CLI it exists with type "sdk"
+					mcpConfig[name] = map[string]interface{}{"type": "sdk"}
+				}
+				// TODO: support external server configs (stdio, http, etc.)
+			}
+			if len(mcpConfig) > 0 {
+				configJSON, err := json.Marshal(map[string]interface{}{"mcpServers": mcpConfig})
+				if err == nil {
+					args = append(args, "--mcp-config", string(configJSON))
+					t.logger.Debug("MCP config: %s", string(configJSON))
+				} else {
+					t.logger.Warning("Failed to marshal MCP config: %v", err)
+				}
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	stdlog "log"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,18 @@ func NewQuery(ctx context.Context, transport transport.Transport, opts *types.Cl
 	if opts != nil {
 		q.canUseTool = opts.CanUseTool
 		q.hooks = opts.Hooks
+
+		// Wire up MCP servers from options so control requests get routed.
+		if opts.McpServers != nil {
+			if servers, ok := opts.McpServers.(map[string]interface{}); ok {
+				for name, srv := range servers {
+					if mcpSrv, ok := srv.(types.MCPServer); ok {
+						q.mcpServers[name] = mcpSrv
+						logger.Debug("Registered MCP server: %s", name)
+					}
+				}
+			}
+		}
 	}
 
 	return q
@@ -234,8 +247,9 @@ func (q *Query) routeMessage(msg types.Message) error {
 
 	// Handle control requests
 	if msgType == "control_request" {
-		q.logger.Debug("Handling control request from CLI")
+		stdlog.Printf("[sdk-query] Received control_request from CLI")
 		if sysMsg, ok := msg.(*types.SystemMessage); ok {
+			stdlog.Printf("[sdk-query] control_request subtype=%v", sysMsg.Request["subtype"])
 			go q.handleControlRequest(sysMsg)
 			return nil
 		}
@@ -338,7 +352,9 @@ func (q *Query) handleControlRequest(msg *types.SystemMessage) {
 	case "hook_callback":
 		response, err = q.handleHookCallback(requestData)
 	case "mcp_message":
+		stdlog.Printf("[sdk-query] MCP message for server=%v", requestData["server_name"])
 		response, err = q.handleMCPMessage(requestData)
+		stdlog.Printf("[sdk-query] MCP response err=%v", err)
 	case "interrupt":
 		// Handle interrupt - just acknowledge for now
 		response = make(map[string]interface{})
