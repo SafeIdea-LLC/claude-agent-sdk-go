@@ -452,29 +452,15 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 	}
 
-	// Add MCP server configuration.
-	// SDK MCP servers (in-process) are declared to the CLI via --mcp-config
-	// with type "sdk". The CLI routes tool calls back through the control
-	// protocol as mcp_message requests, handled by the Query handler.
-	if t.options != nil && t.options.McpServers != nil {
-		if servers, ok := t.options.McpServers.(map[string]interface{}); ok {
-			mcpConfig := make(map[string]interface{})
-			for name, srv := range servers {
-				if _, isMCP := srv.(types.MCPServer); isMCP {
-					// SDK-managed server: tell CLI it exists with type "sdk"
-					mcpConfig[name] = map[string]interface{}{"type": "sdk"}
-				}
-				// TODO: support external server configs (stdio, http, etc.)
+	// Add extra CLI arguments (e.g. --mcp-config for HTTP MCP servers).
+	if t.options != nil && len(t.options.ExtraArgs) > 0 {
+		for flag, val := range t.options.ExtraArgs {
+			if val != nil {
+				args = append(args, flag, *val)
+			} else {
+				args = append(args, flag)
 			}
-			if len(mcpConfig) > 0 {
-				configJSON, err := json.Marshal(map[string]interface{}{"mcpServers": mcpConfig})
-				if err == nil {
-					args = append(args, "--mcp-config", string(configJSON))
-					t.logger.Debug("MCP config: %s", string(configJSON))
-				} else {
-					t.logger.Warning("Failed to marshal MCP config: %v", err)
-				}
-			}
+			t.logger.Debug("Extra arg: %s", flag)
 		}
 	}
 

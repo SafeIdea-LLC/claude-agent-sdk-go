@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/schlunsen/claude-agent-sdk-go/internal"
 	"github.com/schlunsen/claude-agent-sdk-go/internal/log"
@@ -119,35 +118,15 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 		return nil, types.NewCLIConnectionErrorWithCause("failed to connect to Claude CLI", err)
 	}
 
-	// Enable streaming mode when MCP servers are configured so the control
-	// protocol initialization handshake runs. Without it, the CLI won't route
-	// mcp_message control requests for type:"sdk" MCP servers.
-	hasMCPServers := false
-	if options.McpServers != nil {
-		if servers, ok := options.McpServers.(map[string]interface{}); ok {
-			hasMCPServers = len(servers) > 0
-		}
-	}
-	queryHandler := internal.NewQuery(ctx, transportInst, options, logger, hasMCPServers)
+	// Create query handler. MCP servers are wired up inside NewQuery so that
+	// CLI-initiated control_request messages (mcp_message) get routed to the
+	// registered MCP server handlers.
+	queryHandler := internal.NewQuery(ctx, transportInst, options, logger, false)
 
 	// Start message processing
 	if err := queryHandler.Start(ctx); err != nil {
 		_ = transportInst.Close(ctx)
 		return nil, err
-	}
-
-	// Run control protocol initialization when streaming mode is active.
-	// This handshake is required for SDK MCP servers to work.
-	// Use a timeout to avoid hanging if the CLI doesn't support the protocol.
-	if hasMCPServers {
-		initCtx, initCancel := context.WithTimeout(ctx, 30*time.Second)
-		_, err := queryHandler.Initialize(initCtx)
-		initCancel()
-		if err != nil {
-			_ = queryHandler.Stop(ctx)
-			_ = transportInst.Close(ctx)
-			return nil, types.NewControlProtocolErrorWithCause("MCP initialization failed", err)
-		}
 	}
 
 	// Use resume ID as session ID, or default if not resuming
