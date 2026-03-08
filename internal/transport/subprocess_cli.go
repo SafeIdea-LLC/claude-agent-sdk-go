@@ -44,6 +44,9 @@ type SubprocessCLITransport struct {
 	// Writer for stdin
 	writer *JSONLineWriter
 
+	// Temp file for SDK MCP server config (cleaned up on Close)
+	tempMCPConfig string
+
 	// Error tracking
 	mu    sync.Mutex
 	err   error
@@ -104,8 +107,11 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 	t.cmd.Env = os.Environ()
 
 	// Add SDK-specific variables
-	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENTRYPOINT=agent")
+	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	t.cmd.Env = append(t.cmd.Env, fmt.Sprintf("CLAUDE_AGENT_SDK_VERSION=%s", SDKVersion))
+	// Enable fine-grained streaming — without this the CLI batches messages
+	// and delivers them only after each turn completes (no incremental streaming).
+	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
 
 	// Add model environment variable if specified in options (ANTHROPIC_MODEL)
 	// This is critical - both CLI flag and env var should be set for maximum compatibility
@@ -346,6 +352,12 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 	}
 
+	// Add include-partial-messages flag for incremental streaming
+	if t.options != nil && t.options.IncludePartialMessages {
+		args = append(args, "--include-partial-messages")
+		t.logger.Debug("Including partial messages for incremental streaming")
+	}
+
 	// Add extended thinking token limit if specified
 	if t.options != nil && t.options.MaxThinkingTokens != nil {
 		args = append(args, "--max-thinking-tokens", fmt.Sprintf("%d", *t.options.MaxThinkingTokens))
@@ -452,6 +464,53 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 	}
 
+	// Generate --mcp-config for SDK MCP servers registered via WithMcpServers().
+	// SDK servers (implementing MCPServer interface) are declared as type "sdk" so
+	// the CLI routes MCP messages back through the control protocol instead of
+	// making HTTP/stdio calls. The query handler (internal.Query) handles routing.
+	if t.options != nil && t.options.McpServers != nil {
+		if servers, ok := t.options.McpServers.(map[string]interface{}); ok && len(servers) > 0 {
+			mcpConfig := make(map[string]interface{})
+			for name, srv := range servers {
+				if _, isMCP := srv.(types.MCPServer); isMCP {
+					// SDK server — tell CLI to route via control protocol
+					mcpConfig[name] = map[string]interface{}{"type": "sdk"}
+					t.logger.Debug("MCP server (sdk): %s", name)
+				}
+				// Non-MCPServer entries (e.g. McpHTTPServerConfig) are passed through
+				// as-is — they contain their own type/url/command fields.
+				if _, isMCP := srv.(types.MCPServer); !isMCP {
+					mcpConfig[name] = srv
+					t.logger.Debug("MCP server (passthrough): %s", name)
+				}
+			}
+			if len(mcpConfig) > 0 {
+				configJSON := map[string]interface{}{"mcpServers": mcpConfig}
+				data, err := json.Marshal(configJSON)
+				if err != nil {
+					t.logger.Warning("Failed to marshal MCP config: %v", err)
+				} else {
+					// Write to temp file — CLI may not accept inline JSON for large configs
+					tmpFile, err := os.CreateTemp("", "claude-mcp-*.json")
+					if err != nil {
+						t.logger.Warning("Failed to create temp MCP config file: %v", err)
+					} else {
+						if _, err := tmpFile.Write(data); err != nil {
+							t.logger.Warning("Failed to write temp MCP config: %v", err)
+							_ = tmpFile.Close()
+							_ = os.Remove(tmpFile.Name())
+						} else {
+							_ = tmpFile.Close()
+							t.tempMCPConfig = tmpFile.Name()
+							args = append(args, "--mcp-config", t.tempMCPConfig)
+							t.logger.Debug("MCP config file: %s", t.tempMCPConfig)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Add extra CLI arguments (e.g. --mcp-config for HTTP MCP servers).
 	if t.options != nil && len(t.options.ExtraArgs) > 0 {
 		for flag, val := range t.options.ExtraArgs {
@@ -491,6 +550,12 @@ func (t *SubprocessCLITransport) Close(ctx context.Context) error {
 
 	t.logger.Debug("Closing CLI subprocess...")
 	t.ready = false
+
+	// Clean up temp MCP config file
+	if t.tempMCPConfig != "" {
+		_ = os.Remove(t.tempMCPConfig)
+		t.tempMCPConfig = ""
+	}
 
 	// Cancel the context to stop goroutines
 	if t.cancel != nil {

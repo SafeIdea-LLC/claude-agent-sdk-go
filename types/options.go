@@ -299,6 +299,20 @@ func (o *ClaudeAgentOptions) WithMcpServers(servers interface{}) *ClaudeAgentOpt
 	return o
 }
 
+// WithMCPServer registers an in-process SDK MCP server by name.
+// The server will be declared as type "sdk" in the CLI config so MCP messages
+// are routed back through the control protocol to the query handler.
+// The server must implement the MCPServer interface (HandleMessage, Name, Version).
+func (o *ClaudeAgentOptions) WithMCPServer(name string, server MCPServer) *ClaudeAgentOptions {
+	servers, ok := o.McpServers.(map[string]interface{})
+	if !ok || servers == nil {
+		servers = make(map[string]interface{})
+	}
+	servers[name] = server
+	o.McpServers = servers
+	return o
+}
+
 // WithPermissionMode sets the permission mode.
 func (o *ClaudeAgentOptions) WithPermissionMode(mode PermissionMode) *ClaudeAgentOptions {
 	o.PermissionMode = &mode
