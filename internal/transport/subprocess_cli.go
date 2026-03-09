@@ -185,6 +185,7 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 	defer close(t.messages)
 
 	t.logger.Debug("Message reader loop started")
+	stdlog.Printf("[sdk-transport] Message reader loop started, waiting for CLI stdout...")
 	reader := NewJSONLineReader(t.stdout)
 
 	for {
@@ -219,6 +220,9 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 		if len(line) == 0 {
 			continue
 		}
+
+		// Log raw JSON for debugging MCP control protocol
+		stdlog.Printf("[sdk-transport] <<< CLI stdout: %s", string(line))
 
 		// Parse JSON into message
 		msg, err := types.UnmarshalMessage(line)
@@ -295,26 +299,21 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		t.logger.Debug("Setting permission mode: %s", string(*t.options.PermissionMode))
 	}
 
-	// Add system prompt - always pass the flag to match Python SDK behavior
-	// When nil, pass empty string to prevent unintended Claude Code defaults
+	// Add system prompt — match Python SDK: cmd.extend(["--system-prompt", ""])
 	if t.options != nil {
 		if t.options.SystemPrompt == nil {
-			// Default to empty system prompt when not specified
 			args = append(args, "--system-prompt", "")
 			t.logger.Debug("Setting empty system prompt (default)")
 		} else if promptStr, ok := t.options.SystemPrompt.(string); ok {
-			// Handle string prompt
 			args = append(args, "--system-prompt", promptStr)
 			t.logger.Debug("Setting system prompt: %s", promptStr)
 		} else if preset, ok := t.options.SystemPrompt.(types.SystemPromptPreset); ok {
-			// Handle preset case - append to default Claude Code prompt
 			if preset.Append != nil {
 				args = append(args, "--append-system-prompt", *preset.Append)
 				t.logger.Debug("Appending to system prompt preset: %s", *preset.Append)
 			}
 		}
 	} else {
-		// No options provided, use empty system prompt
 		args = append(args, "--system-prompt", "")
 		t.logger.Debug("Setting empty system prompt (no options)")
 	}
@@ -391,7 +390,8 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 	}
 
-	// Add setting sources if specified (enables local slash commands, CLAUDE.md, etc.)
+	// Always pass --setting-sources (matching Python SDK).
+	// Python SDK: cmd.extend(["--setting-sources", ",".join(sources) or ""])
 	if t.options != nil && len(t.options.SettingSources) > 0 {
 		sources := make([]string, len(t.options.SettingSources))
 		for i, src := range t.options.SettingSources {
@@ -399,6 +399,8 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 		args = append(args, "--setting-sources", joinStrings(sources, ","))
 		t.logger.Debug("Setting sources: %s", joinStrings(sources, ","))
+	} else {
+		args = append(args, "--setting-sources", "")
 	}
 
 	// Add agents if specified
@@ -465,21 +467,23 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 	}
 
 	// Generate --mcp-config for SDK MCP servers registered via WithMcpServers().
+	// Generate --mcp-config for SDK MCP servers registered via WithMcpServers().
 	// SDK servers (implementing MCPServer interface) are declared as type "sdk" so
 	// the CLI routes MCP messages back through the control protocol instead of
 	// making HTTP/stdio calls. The query handler (internal.Query) handles routing.
+	// Match Python SDK: pass inline JSON, not a temp file.
 	if t.options != nil && t.options.McpServers != nil {
 		if servers, ok := t.options.McpServers.(map[string]interface{}); ok && len(servers) > 0 {
 			mcpConfig := make(map[string]interface{})
 			for name, srv := range servers {
 				if _, isMCP := srv.(types.MCPServer); isMCP {
-					// SDK server — tell CLI to route via control protocol
-					mcpConfig[name] = map[string]interface{}{"type": "sdk"}
+					// SDK server — tell CLI to route via control protocol.
+					// The "name" field is required by the CLI MCP config
+					// schema validator.
+					mcpConfig[name] = map[string]interface{}{"type": "sdk", "name": name}
 					t.logger.Debug("MCP server (sdk): %s", name)
-				}
-				// Non-MCPServer entries (e.g. McpHTTPServerConfig) are passed through
-				// as-is — they contain their own type/url/command fields.
-				if _, isMCP := srv.(types.MCPServer); !isMCP {
+				} else {
+					// Non-MCPServer entries (e.g. McpHTTPServerConfig) passed as-is
 					mcpConfig[name] = srv
 					t.logger.Debug("MCP server (passthrough): %s", name)
 				}
@@ -490,22 +494,10 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 				if err != nil {
 					t.logger.Warning("Failed to marshal MCP config: %v", err)
 				} else {
-					// Write to temp file — CLI may not accept inline JSON for large configs
-					tmpFile, err := os.CreateTemp("", "claude-mcp-*.json")
-					if err != nil {
-						t.logger.Warning("Failed to create temp MCP config file: %v", err)
-					} else {
-						if _, err := tmpFile.Write(data); err != nil {
-							t.logger.Warning("Failed to write temp MCP config: %v", err)
-							_ = tmpFile.Close()
-							_ = os.Remove(tmpFile.Name())
-						} else {
-							_ = tmpFile.Close()
-							t.tempMCPConfig = tmpFile.Name()
-							args = append(args, "--mcp-config", t.tempMCPConfig)
-							t.logger.Debug("MCP config file: %s", t.tempMCPConfig)
-						}
-					}
+					stdlog.Printf("[sdk-transport] MCP config JSON: %s", string(data))
+					// Pass as inline JSON (matching Python SDK behavior)
+					args = append(args, "--mcp-config", string(data))
+					t.logger.Debug("MCP config (inline): %s", string(data))
 				}
 			}
 		}

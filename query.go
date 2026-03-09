@@ -118,15 +118,29 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 		return nil, types.NewCLIConnectionErrorWithCause("failed to connect to Claude CLI", err)
 	}
 
-	// Create query handler. MCP servers are wired up inside NewQuery so that
-	// CLI-initiated control_request messages (mcp_message) get routed to the
-	// registered MCP server handlers.
-	queryHandler := internal.NewQuery(ctx, transportInst, options, logger, false)
+	// Create query handler in streaming mode so the control protocol is active.
+	// MCP servers are wired up inside NewQuery so that CLI-initiated
+	// control_request messages (mcp_message) get routed to the registered
+	// MCP server handlers.
+	queryHandler := internal.NewQuery(ctx, transportInst, options, logger, true)
 
-	// Start message processing
+	// Start the message processing loop — this must happen before Initialize
+	// so the reader goroutine is draining stdout and can route the CLI's
+	// control_response back to Initialize's waiting channel.
 	if err := queryHandler.Start(ctx); err != nil {
 		_ = transportInst.Close(ctx)
 		return nil, err
+	}
+
+	// Initialize the control protocol. The CLI won't process user messages
+	// until this handshake completes. During initialization, the CLI also
+	// sends MCP initialize/tools_list control_requests for any SDK MCP
+	// servers — the messageLoop handles those concurrently.
+	if _, err := queryHandler.Initialize(ctx); err != nil {
+		logger.Error("Control protocol initialization failed: %v", err)
+		_ = queryHandler.Stop(ctx)
+		_ = transportInst.Close(ctx)
+		return nil, types.NewControlProtocolErrorWithCause("initialization failed", err)
 	}
 
 	// Use resume ID as session ID, or default if not resuming

@@ -85,6 +85,11 @@ func (s *SDKMCPServer) HandleMessage(message map[string]interface{}) (map[string
 
 	// Route to appropriate handler
 	switch method {
+	case "initialize":
+		return s.handleInitialize(message)
+	case "notifications/initialized":
+		// Acknowledgment notification — no meaningful response needed.
+		return map[string]interface{}{}, nil
 	case "tools/list":
 		return s.handleListTools(message)
 	case "tools/call":
@@ -92,6 +97,23 @@ func (s *SDKMCPServer) HandleMessage(message map[string]interface{}) (map[string
 	default:
 		return s.errorResponse(message, -32601, "Method not found: "+method), nil
 	}
+}
+
+// handleInitialize responds to the MCP initialize handshake.
+func (s *SDKMCPServer) handleInitialize(message map[string]interface{}) (map[string]interface{}, error) {
+	id := message["id"]
+	return map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result": map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+			"serverInfo": map[string]interface{}{
+				"name":    s.name,
+				"version": s.version,
+			},
+		},
+	}, nil
 }
 
 // handleListTools returns the list of available tools.
