@@ -282,6 +282,7 @@ func (t *SubprocessCLITransport) ReadMessages(ctx context.Context) <-chan types.
 // This is extracted into a separate method to allow for testing.
 func (t *SubprocessCLITransport) buildCommandArgs() []string {
 	args := []string{
+		"--print",
 		"--input-format=stream-json",
 		"--output-format=stream-json",
 		"--verbose",
