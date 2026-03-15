@@ -277,7 +277,9 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 
 		// Log raw line type for diagnostics (extract "type" field quickly).
 		{
-			var peek struct{ Type string `json:"type"` }
+			var peek struct {
+				Type string `json:"type"`
+			}
 			if json.Unmarshal(line, &peek) == nil && peek.Type != "" {
 				stdlog.Printf("[sdk-transport] raw line type=%s len=%d", peek.Type, len(line))
 			}
