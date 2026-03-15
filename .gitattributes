@@ -1,0 +1,4 @@
+# Force LF for Go source and module files
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
