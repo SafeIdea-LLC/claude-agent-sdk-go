@@ -74,6 +74,14 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 		return nil, fmt.Errorf("prompt cannot be empty")
 	}
 
+	// Match TS SDK / Client behavior: when CanUseTool is set, automatically
+	// add --permission-prompt-tool stdio so the CLI routes permission requests
+	// (and stream_event messages) through the stdin/stdout control protocol.
+	if options.CanUseTool != nil && options.PermissionPromptToolName == nil {
+		stdio := "stdio"
+		options.PermissionPromptToolName = &stdio
+	}
+
 	// Find Claude CLI path
 	cliPath := ""
 	if options.CLIPath != nil {
@@ -176,7 +184,7 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 	}
 
 	// Create output channel for user
-	outputChan := make(chan types.Message, 10)
+	outputChan := make(chan types.Message, 1024)
 
 	// Start goroutine to read messages and forward to output channel
 	go func() {

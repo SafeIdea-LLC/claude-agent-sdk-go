@@ -217,6 +217,7 @@ type AssistantMessage struct {
 	Type            string         `json:"type"`
 	Content         []ContentBlock `json:"content"`
 	Model           string         `json:"model"`
+	ID              string         `json:"id,omitempty"` // Message ID from nested message object
 	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
 }
 
@@ -257,11 +258,17 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 				contentBlocks = nested
 			}
 		}
-		// Also extract model from nested message if present
+		// Also extract model and id from nested message if present
 		if modelRaw, ok := aux.Message["model"]; ok {
 			var model string
 			if err := json.Unmarshal(modelRaw, &model); err == nil {
 				m.Model = model
+			}
+		}
+		if idRaw, ok := aux.Message["id"]; ok {
+			var id string
+			if err := json.Unmarshal(idRaw, &id); err == nil {
+				m.ID = id
 			}
 		}
 	}
@@ -428,6 +435,14 @@ func UnmarshalMessage(data []byte) (Message, error) {
 		var msg StreamEvent
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, NewJSONDecodeErrorWithCause("failed to unmarshal stream event", string(data), err)
+		}
+		return &msg, nil
+	case "rate_limit_event", "keep_alive", "streamlined_text", "streamlined_tool_use_summary", "control_cancel_request":
+		// Known informational message types that don't need to be forwarded.
+		// Parse as SystemMessage to avoid unknown-type errors.
+		var msg SystemMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return nil, NewJSONDecodeErrorWithCause("failed to unmarshal "+typeCheck.Type, string(data), err)
 		}
 		return &msg, nil
 	default:

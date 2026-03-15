@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/schlunsen/claude-agent-sdk-go/internal/log"
@@ -68,7 +69,7 @@ func NewSubprocessCLITransport(cliPath, cwd string, env map[string]string, logge
 		logger:          logger,
 		resumeSessionID: resumeSessionID,
 		options:         options,
-		messages:        make(chan types.Message, 10), // Buffered channel for smooth streaming
+		messages:        make(chan types.Message, 1024), // Large buffer to prevent stdout backpressure deadlock
 	}
 }
 
@@ -90,12 +91,35 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 	// Build command arguments
 	args := t.buildCommandArgs()
 
-	// Log the full command for debugging
-	t.logger.Debug("Claude CLI command: %s %v", t.cliPath, args)
-	stdlog.Printf("[sdk-transport] CLI args: %v", args)
+	// Resolve npm wrapper scripts to node + cli.js for reliable subprocess
+	// invocation. On Windows, npm .cmd/.sh wrappers fail when launched via
+	// exec.Command (path resolution issues, bash-on-Windows incompatibility).
+	execPath := t.cliPath
+	resolvedExec, extraArgs := resolveCLIForSubprocess(t.cliPath)
+	if len(extraArgs) > 0 {
+		execPath = resolvedExec
+		args = append(extraArgs, args...)
+		stdlog.Printf("[sdk-transport] resolved npm wrapper %s → %s %s", t.cliPath, execPath, extraArgs[0])
+	}
+
+	// Log the command and args for debugging.
+	t.logger.Debug("Claude CLI command: %s (%d args)", execPath, len(args))
+	// Log each arg (redact system prompt value for brevity).
+	for i, arg := range args {
+		if i > 0 && args[i-1] == "--system-prompt" {
+			stdlog.Printf("[sdk-transport] arg[%d]: <system-prompt-value-redacted> (%d chars)", i, len(arg))
+		} else {
+			stdlog.Printf("[sdk-transport] arg[%d]: %s", i, arg)
+		}
+	}
+	stdlog.Printf("[sdk-transport] launching CLI with %d args", len(args))
 
 	// Create command with arguments
-	t.cmd = exec.CommandContext(t.ctx, t.cliPath, args...)
+	t.cmd = exec.CommandContext(t.ctx, execPath, args...)
+
+	// On Windows, detach the child process from the parent's console.
+	// This matches the TS SDK's windowsHide: true / CREATE_NO_WINDOW flag.
+	setProcAttr(t.cmd)
 
 	// Set working directory if provided
 	if t.cwd != "" {
@@ -106,12 +130,17 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 	// Start with current environment
 	t.cmd.Env = os.Environ()
 
-	// Add SDK-specific variables
-	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	// Match TypeScript SDK behavior exactly.
+	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENTRYPOINT=sdk-ts")
 	t.cmd.Env = append(t.cmd.Env, fmt.Sprintf("CLAUDE_AGENT_SDK_VERSION=%s", SDKVersion))
-	// Enable fine-grained streaming — without this the CLI batches messages
-	// and delivers them only after each turn completes (no incremental streaming).
-	t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
+	// TS SDK deletes NODE_OPTIONS to prevent interference.
+	filtered := make([]string, 0, len(t.cmd.Env))
+	for _, e := range t.cmd.Env {
+		if !strings.HasPrefix(e, "NODE_OPTIONS=") {
+			filtered = append(filtered, e)
+		}
+	}
+	t.cmd.Env = filtered
 
 	// Add model environment variable if specified in options (ANTHROPIC_MODEL)
 	// This is critical - both CLI flag and env var should be set for maximum compatibility
@@ -131,13 +160,21 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 		t.logger.Debug("ANTHROPIC_BASE_URL not set (using default Anthropic API)")
 	}
 
+	// Match TS SDK: set CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
+	// when includePartialMessages is true. Without this env var, the CLI
+	// does not emit stream_event messages through the control protocol path.
+	if t.options != nil && t.options.IncludePartialMessages {
+		t.cmd.Env = append(t.cmd.Env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
+		t.logger.Debug("Enabling fine-grained tool streaming (CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1)")
+	}
+
 	// Add custom environment variables (these can override the above if needed)
 	for key, value := range t.env {
 		t.cmd.Env = append(t.cmd.Env, fmt.Sprintf("%s=%s", key, value))
 		t.logger.Debug("Setting custom environment variable: %s=%s", key, value)
 	}
 
-	// Set up pipes
+	// Set up stdin/stdout/stderr pipes.
 	var err error
 
 	t.stdin, err = t.cmd.StdinPipe()
@@ -150,10 +187,20 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 		return types.NewCLIConnectionErrorWithCause("failed to create stdout pipe", err)
 	}
 
-	t.stderr, err = t.cmd.StderrPipe()
-	if err != nil {
-		return types.NewCLIConnectionErrorWithCause("failed to create stderr pipe", err)
+	// Stderr handling: match the TypeScript SDK which uses stdio: ["pipe","pipe","ignore"].
+	// On Windows, piping stderr is dangerous — the CLI's Node.js Ink TUI writes
+	// verbose output to stderr, and with 4KB pipe buffers, if our reader falls
+	// behind even briefly, the CLI blocks on stderr.write() which freezes its
+	// entire event loop, preventing stream_event messages from reaching stdout.
+	// Only pipe stderr if the caller explicitly configured a callback or log file.
+	needsStderr := (t.options != nil && t.options.Stderr != nil) || (t.options != nil && t.options.StderrLogFile != nil)
+	if needsStderr {
+		t.stderr, err = t.cmd.StderrPipe()
+		if err != nil {
+			return types.NewCLIConnectionErrorWithCause("failed to create stderr pipe", err)
+		}
 	}
+	// If !needsStderr, cmd.Stderr is nil → stderr goes to os.DevNull (matching TS SDK "ignore").
 
 	// Start the process
 	if err := t.cmd.Start(); err != nil {
@@ -168,8 +215,10 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 	// Launch message reader loop in goroutine
 	go t.messageReaderLoop(t.ctx)
 
-	// Launch stderr reader for debugging
-	go t.readStderr(t.ctx)
+	// Launch stderr reader only if we piped stderr
+	if needsStderr {
+		go t.readStderr(t.ctx)
+	}
 
 	// Mark as ready
 	t.ready = true
@@ -188,11 +237,15 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 	stdlog.Printf("[sdk-transport] Message reader loop started, waiting for CLI stdout...")
 	reader := NewJSONLineReader(t.stdout)
 
+	// Diagnostic counters — logged at EOF to show what message types arrived.
+	typeCounts := make(map[string]int)
+
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			t.logger.Debug("Message reader loop stopped: context cancelled")
+			stdlog.Printf("[sdk-transport] message type counts: %v", typeCounts)
 			return
 		default:
 		}
@@ -202,11 +255,12 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 		if err != nil {
 			if err == io.EOF {
 				t.logger.Debug("Message reader loop stopped: EOF from CLI")
-				// Normal end of stream
+				stdlog.Printf("[sdk-transport] EOF — message type counts: %v", typeCounts)
 				return
 			}
 
 			t.logger.Error("Failed to read from CLI stdout: %v", err)
+			stdlog.Printf("[sdk-transport] read error — message type counts: %v", typeCounts)
 			// Store error and return
 			t.OnError(types.NewJSONDecodeErrorWithCause(
 				"failed to read JSON line from subprocess",
@@ -221,19 +275,25 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 			continue
 		}
 
-		// Log raw JSON for debugging MCP control protocol
-		stdlog.Printf("[sdk-transport] <<< CLI stdout: %s", string(line))
+		// Log raw line type for diagnostics (extract "type" field quickly).
+		{
+			var peek struct{ Type string `json:"type"` }
+			if json.Unmarshal(line, &peek) == nil && peek.Type != "" {
+				stdlog.Printf("[sdk-transport] raw line type=%s len=%d", peek.Type, len(line))
+			}
+		}
 
-		// Parse JSON into message
+		// Parse JSON into message (minimize work before sending to channel).
 		msg, err := types.UnmarshalMessage(line)
 		if err != nil {
 			t.logger.Warning("Failed to parse message from CLI: %v", err)
+			stdlog.Printf("[sdk-transport] parse error: %v (line prefix: %.100s)", err, string(line))
 			// Store parse error but continue reading
 			t.OnError(err)
 			continue
 		}
 
-		t.logger.Debug("Received message from CLI: type=%s", msg.GetMessageType())
+		typeCounts[msg.GetMessageType()]++
 
 		// Send message to channel (respect context cancellation)
 		select {
@@ -245,7 +305,7 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 	}
 }
 
-// Write sends a JSON message to the subprocess stdin.
+// Write sends a JSON message to the subprocess via stdin.
 // The data should be a complete JSON string (newline will be added automatically).
 func (t *SubprocessCLITransport) Write(ctx context.Context, data string) error {
 	t.mu.Lock()
@@ -281,11 +341,11 @@ func (t *SubprocessCLITransport) ReadMessages(ctx context.Context) <-chan types.
 // buildCommandArgs builds the command line arguments for the CLI subprocess.
 // This is extracted into a separate method to allow for testing.
 func (t *SubprocessCLITransport) buildCommandArgs() []string {
+	// Base args for NDJSON streaming.
 	args := []string{
-		"--print",
-		"--input-format=stream-json",
-		"--output-format=stream-json",
+		"--output-format", "stream-json",
 		"--verbose",
+		"--input-format", "stream-json",
 	}
 
 	// Add permission prompt tool if specified
@@ -391,8 +451,8 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 		}
 	}
 
-	// Always pass --setting-sources (matching Python SDK).
-	// Python SDK: cmd.extend(["--setting-sources", ",".join(sources) or ""])
+	// Pass --setting-sources to prevent the CLI from loading the user's
+	// global Claude settings which could interfere with SafeIdea's behavior.
 	if t.options != nil && len(t.options.SettingSources) > 0 {
 		sources := make([]string, len(t.options.SettingSources))
 		for i, src := range t.options.SettingSources {
@@ -495,7 +555,7 @@ func (t *SubprocessCLITransport) buildCommandArgs() []string {
 				if err != nil {
 					t.logger.Warning("Failed to marshal MCP config: %v", err)
 				} else {
-					stdlog.Printf("[sdk-transport] MCP config JSON: %s", string(data))
+					t.logger.Debug("MCP config: %d bytes", len(data))
 					// Pass as inline JSON (matching Python SDK behavior)
 					args = append(args, "--mcp-config", string(data))
 					t.logger.Debug("MCP config (inline): %s", string(data))
@@ -623,52 +683,40 @@ func (t *SubprocessCLITransport) GetError() error {
 // readStderr reads stderr output in a goroutine for debugging.
 // This is a helper function for monitoring subprocess errors.
 // It also parses known error patterns and stores them as typed errors.
+//
+// IMPORTANT: This reader must drain stderr as fast as possible.
+// On Windows, pipe buffers are small (~4KB). If the reader is slow
+// (e.g. fsync on every line), the CLI blocks on stderr.write() which
+// blocks its entire Node.js event loop, preventing stream_event
+// messages from being written to stdout.
 func (t *SubprocessCLITransport) readStderr(ctx context.Context) {
 	if t.stderr == nil {
 		return
 	}
 
-	// Determine if file logging is enabled via StderrLogFile option
-	var logFile *os.File
+	// Set up file logging in a separate goroutine to avoid blocking the reader.
+	var logCh chan string
 	if t.options != nil && t.options.StderrLogFile != nil {
-		// Resolve log file path
-		logPath := *t.options.StderrLogFile
-		if logPath == "" {
-			// Use default location
-			homeDir, _ := os.UserHomeDir()
-			logPath = fmt.Sprintf("%s/.claude/agents_server/cli_stderr.log", homeDir)
-		}
-
-		// Create parent directory if it doesn't exist
-		logDir := filepath.Dir(logPath)
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[SDK] Failed to create stderr log directory %s: %v\n"+
-					"Stderr file logging disabled. To fix, create directory:\n"+
-					"  mkdir -p %s\n",
-				logDir, err, logDir)
-		} else {
-			// Try to open log file
-			var err error
-			logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr,
-					"[SDK] Failed to open stderr log file %s: %v\n"+
-						"Stderr file logging disabled. Possible fixes:\n"+
-						"  1. Ensure directory exists: mkdir -p %s\n"+
-						"  2. Check file permissions: chmod 644 %s\n"+
-						"  3. Use custom path: opts.WithCustomStderrLogFile(\"/path/to/file.log\")\n",
-					logPath, err, logDir, logPath)
-			} else {
-				t.logger.Debug("Stderr file logging enabled: %s", logPath)
+		logCh = make(chan string, 256) // buffered to avoid blocking
+		go func() {
+			logPath := *t.options.StderrLogFile
+			if logPath == "" {
+				homeDir, _ := os.UserHomeDir()
+				logPath = fmt.Sprintf("%s/.claude/agents_server/cli_stderr.log", homeDir)
 			}
-		}
-	}
-
-	// Ensure cleanup if file was opened
-	if logFile != nil {
-		defer func() {
-			_ = logFile.Close()
+			logDir := filepath.Dir(logPath)
+			if err := os.MkdirAll(logDir, 0755); err != nil {
+				return
+			}
+			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				return
+			}
+			defer logFile.Close()
+			for line := range logCh {
+				_, _ = fmt.Fprintf(logFile, "[Claude CLI stderr]: %s\n", line)
+				// No fsync — OS will flush on its own schedule.
+			}
 		}()
 	}
 
@@ -676,31 +724,38 @@ func (t *SubprocessCLITransport) readStderr(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if logCh != nil {
+				close(logCh)
+			}
 			return
 		default:
 		}
 
 		line, err := reader.ReadLine()
 		if err != nil {
+			if logCh != nil {
+				close(logCh)
+			}
 			return
 		}
 
-		// Process stderr output
 		if len(line) > 0 {
 			stderrText := string(line)
 
-			// Write to log file if enabled and file is open
-			if logFile != nil {
-				_, _ = fmt.Fprintf(logFile, "[Claude CLI stderr]: %s\n", stderrText)
-				_ = logFile.Sync() // Flush to disk immediately
+			// Non-blocking write to log file goroutine.
+			if logCh != nil {
+				select {
+				case logCh <- stderrText:
+				default: // drop if log goroutine is behind
+				}
 			}
 
-			// Call stderr callback if configured (for runtime control)
+			// Call stderr callback if configured (non-blocking best-effort).
 			if t.options != nil && t.options.Stderr != nil {
 				t.options.Stderr(stderrText)
 			}
 
-			// Parse known error patterns and create typed errors
+			// Parse known error patterns and create typed errors.
 			t.parseStderrError(stderrText)
 		}
 	}

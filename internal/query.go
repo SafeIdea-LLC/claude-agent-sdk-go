@@ -63,7 +63,7 @@ func NewQuery(ctx context.Context, transport transport.Transport, opts *types.Cl
 		logger:          logger,
 		requestMap:      make(map[string]chan responseResult),
 		hookCallbacks:   make(map[string]types.HookCallbackFunc),
-		messagesChan:    make(chan types.Message, 100),
+		messagesChan:    make(chan types.Message, 1024),
 		stopChan:        make(chan struct{}),
 		readLoopDone:    make(chan struct{}),
 		isStreamingMode: isStreamingMode,
