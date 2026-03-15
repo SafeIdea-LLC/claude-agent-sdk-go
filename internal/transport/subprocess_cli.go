@@ -102,18 +102,6 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 		stdlog.Printf("[sdk-transport] resolved npm wrapper %s → %s %s", t.cliPath, execPath, extraArgs[0])
 	}
 
-	// Log the command and args for debugging.
-	t.logger.Debug("Claude CLI command: %s (%d args)", execPath, len(args))
-	// Log each arg (redact system prompt value for brevity).
-	for i, arg := range args {
-		if i > 0 && args[i-1] == "--system-prompt" {
-			stdlog.Printf("[sdk-transport] arg[%d]: <system-prompt-value-redacted> (%d chars)", i, len(arg))
-		} else {
-			stdlog.Printf("[sdk-transport] arg[%d]: %s", i, arg)
-		}
-	}
-	stdlog.Printf("[sdk-transport] launching CLI with %d args", len(args))
-
 	// Create command with arguments
 	t.cmd = exec.CommandContext(t.ctx, execPath, args...)
 
@@ -234,18 +222,13 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 	defer close(t.messages)
 
 	t.logger.Debug("Message reader loop started")
-	stdlog.Printf("[sdk-transport] Message reader loop started, waiting for CLI stdout...")
 	reader := NewJSONLineReader(t.stdout)
-
-	// Diagnostic counters — logged at EOF to show what message types arrived.
-	typeCounts := make(map[string]int)
 
 	for {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			t.logger.Debug("Message reader loop stopped: context cancelled")
-			stdlog.Printf("[sdk-transport] message type counts: %v", typeCounts)
 			return
 		default:
 		}
@@ -255,12 +238,10 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 		if err != nil {
 			if err == io.EOF {
 				t.logger.Debug("Message reader loop stopped: EOF from CLI")
-				stdlog.Printf("[sdk-transport] EOF — message type counts: %v", typeCounts)
 				return
 			}
 
 			t.logger.Error("Failed to read from CLI stdout: %v", err)
-			stdlog.Printf("[sdk-transport] read error — message type counts: %v", typeCounts)
 			// Store error and return
 			t.OnError(types.NewJSONDecodeErrorWithCause(
 				"failed to read JSON line from subprocess",
@@ -275,27 +256,14 @@ func (t *SubprocessCLITransport) messageReaderLoop(ctx context.Context) {
 			continue
 		}
 
-		// Log raw line type for diagnostics (extract "type" field quickly).
-		{
-			var peek struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(line, &peek) == nil && peek.Type != "" {
-				stdlog.Printf("[sdk-transport] raw line type=%s len=%d", peek.Type, len(line))
-			}
-		}
-
 		// Parse JSON into message (minimize work before sending to channel).
 		msg, err := types.UnmarshalMessage(line)
 		if err != nil {
 			t.logger.Warning("Failed to parse message from CLI: %v", err)
-			stdlog.Printf("[sdk-transport] parse error: %v (line prefix: %.100s)", err, string(line))
 			// Store parse error but continue reading
 			t.OnError(err)
 			continue
 		}
-
-		typeCounts[msg.GetMessageType()]++
 
 		// Send message to channel (respect context cancellation)
 		select {
