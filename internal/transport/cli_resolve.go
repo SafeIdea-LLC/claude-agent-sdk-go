@@ -19,6 +19,17 @@ import (
 //   - If resolved: executable="node", extraArgs=["path/to/cli.js"]
 //   - If not resolved: executable=cliPath, extraArgs=nil
 func resolveCLIForSubprocess(cliPath string) (string, []string) {
+	// If the caller passed a .js file directly (e.g. discovered via npm root -g),
+	// resolve it to "node <script>" without any npm-wrapper heuristics.
+	if strings.HasSuffix(strings.ToLower(cliPath), ".js") {
+		if _, err := os.Stat(cliPath); err == nil {
+			if nodePath, err := exec.LookPath("node"); err == nil {
+				return nodePath, []string{cliPath}
+			}
+		}
+		return cliPath, nil
+	}
+
 	// Normalize to forward slashes for consistent matching.
 	norm := filepath.ToSlash(cliPath)
 
