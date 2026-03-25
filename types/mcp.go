@@ -56,12 +56,22 @@ func (t *Tool) Validate() error {
 	return nil
 }
 
+// ToolResultCallback is called after a tool executes successfully.
+// It receives the tool use ID (from Claude), tool name, input arguments, and the result.
+type ToolResultCallback func(toolUseID, toolName string, args map[string]any, result any)
+
 // SDKMCPServer is a simple MCP server implementation created by the factory function.
 // It handles JSON-RPC 2.0 message routing for list_tools and call_tool methods.
 type SDKMCPServer struct {
-	name    string
-	version string
-	tools   map[string]*Tool
+	name           string
+	version        string
+	tools          map[string]*Tool
+	onToolResult   ToolResultCallback
+}
+
+// SetOnToolResult registers a callback invoked after each successful tool call.
+func (s *SDKMCPServer) SetOnToolResult(cb ToolResultCallback) {
+	s.onToolResult = cb
 }
 
 // Name returns the server name.
@@ -172,6 +182,19 @@ func (s *SDKMCPServer) handleCallTool(message map[string]interface{}) (map[strin
 	result, err := tool.Handler(ctx, args)
 	if err != nil {
 		return s.errorResponse(message, -32603, "Tool execution failed: "+err.Error()), nil
+	}
+
+	// Notify callback so the host can emit tool_result to the UI stream.
+	// Extract Claude's tool_use_id from _meta so the frontend can match
+	// this result to the corresponding tool_call event.
+	toolUseID := ""
+	if meta, ok := params["_meta"].(map[string]interface{}); ok {
+		if id, ok := meta["claudecode/toolUseId"].(string); ok {
+			toolUseID = id
+		}
+	}
+	if s.onToolResult != nil {
+		s.onToolResult(toolUseID, toolName, args, result)
 	}
 
 	// Format the result as content blocks
