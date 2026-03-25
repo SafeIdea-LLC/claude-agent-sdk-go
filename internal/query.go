@@ -275,7 +275,9 @@ func (q *Query) handleControlResponse(msg *types.SystemMessage) error {
 	if !ok {
 		stdlog.Printf("[sdk-query] control_response missing request_id, keys=%v", func() []string {
 			keys := make([]string, 0, len(responseData))
-			for k := range responseData { keys = append(keys, k) }
+			for k := range responseData {
+				keys = append(keys, k)
+			}
 			return keys
 		}())
 		return types.NewControlProtocolError("missing request_id in control response")

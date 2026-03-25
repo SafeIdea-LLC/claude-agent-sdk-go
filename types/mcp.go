@@ -63,10 +63,10 @@ type ToolResultCallback func(toolUseID, toolName string, args map[string]any, re
 // SDKMCPServer is a simple MCP server implementation created by the factory function.
 // It handles JSON-RPC 2.0 message routing for list_tools and call_tool methods.
 type SDKMCPServer struct {
-	name           string
-	version        string
-	tools          map[string]*Tool
-	onToolResult   ToolResultCallback
+	name         string
+	version      string
+	tools        map[string]*Tool
+	onToolResult ToolResultCallback
 }
 
 // SetOnToolResult registers a callback invoked after each successful tool call.
