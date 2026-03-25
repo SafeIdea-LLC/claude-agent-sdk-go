@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,7 +98,7 @@ func (t *SubprocessCLITransport) Connect(ctx context.Context) error {
 	if len(extraArgs) > 0 {
 		execPath = resolvedExec
 		args = append(extraArgs, args...)
-		stdlog.Printf("[sdk-transport] resolved npm wrapper %s → %s %s", t.cliPath, execPath, extraArgs[0])
+		// npm wrapper resolved: execPath + extraArgs[0]
 	}
 
 	// Create command with arguments

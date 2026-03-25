@@ -247,9 +247,7 @@ func (q *Query) routeMessage(msg types.Message) error {
 
 	// Handle control requests
 	if msgType == "control_request" {
-		stdlog.Printf("[sdk-query] Received control_request from CLI")
 		if sysMsg, ok := msg.(*types.SystemMessage); ok {
-			stdlog.Printf("[sdk-query] control_request subtype=%v", sysMsg.Request["subtype"])
 			go q.handleControlRequest(sysMsg)
 			return nil
 		}
@@ -275,6 +273,11 @@ func (q *Query) handleControlResponse(msg *types.SystemMessage) error {
 
 	requestID, ok := responseData["request_id"].(string)
 	if !ok {
+		stdlog.Printf("[sdk-query] control_response missing request_id, keys=%v", func() []string {
+			keys := make([]string, 0, len(responseData))
+			for k := range responseData { keys = append(keys, k) }
+			return keys
+		}())
 		return types.NewControlProtocolError("missing request_id in control response")
 	}
 
@@ -288,6 +291,7 @@ func (q *Query) handleControlResponse(msg *types.SystemMessage) error {
 
 	if !exists {
 		// Orphaned response - might be a timeout or duplicate
+		stdlog.Printf("[sdk-query] orphaned control_response request_id=%s (no pending request)", requestID)
 		return nil
 	}
 
@@ -352,9 +356,7 @@ func (q *Query) handleControlRequest(msg *types.SystemMessage) {
 	case "hook_callback":
 		response, err = q.handleHookCallback(requestData)
 	case "mcp_message":
-		stdlog.Printf("[sdk-query] MCP message for server=%v", requestData["server_name"])
 		response, err = q.handleMCPMessage(requestData)
-		stdlog.Printf("[sdk-query] MCP response err=%v", err)
 	case "interrupt":
 		// Handle interrupt - just acknowledge for now
 		response = make(map[string]interface{})
