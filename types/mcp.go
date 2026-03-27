@@ -66,6 +66,7 @@ type SDKMCPServer struct {
 	name         string
 	version      string
 	tools        map[string]*Tool
+	toolOrder    []string // preserves insertion order for deterministic listing
 	onToolResult ToolResultCallback
 }
 
@@ -128,9 +129,10 @@ func (s *SDKMCPServer) handleInitialize(message map[string]interface{}) (map[str
 
 // handleListTools returns the list of available tools.
 func (s *SDKMCPServer) handleListTools(message map[string]interface{}) (map[string]interface{}, error) {
-	tools := make([]map[string]interface{}, 0, len(s.tools))
+	tools := make([]map[string]interface{}, 0, len(s.toolOrder))
 
-	for _, tool := range s.tools {
+	for _, name := range s.toolOrder {
+		tool := s.tools[name]
 		toolMap := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
@@ -328,6 +330,7 @@ func NewSDKMCPServer(name string, tools ...Tool) (*SDKMCPServer, error) {
 
 	// Build tool map and validate
 	toolMap := make(map[string]*Tool)
+	toolOrder := make([]string, 0, len(tools))
 	for i := range tools {
 		tool := &tools[i]
 
@@ -342,11 +345,13 @@ func NewSDKMCPServer(name string, tools ...Tool) (*SDKMCPServer, error) {
 		}
 
 		toolMap[tool.Name] = tool
+		toolOrder = append(toolOrder, tool.Name)
 	}
 
 	return &SDKMCPServer{
-		name:    name,
-		version: "1.0.0", // Default version
-		tools:   toolMap,
+		name:      name,
+		version:   "1.0.0", // Default version
+		tools:     toolMap,
+		toolOrder: toolOrder,
 	}, nil
 }
