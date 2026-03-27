@@ -226,8 +226,8 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logger.Error("Failed to initialize control protocol: %v", err)
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_ = c.query.Stop(cleanupCtx)
 		_ = c.transport.Close(cleanupCtx)
+		_ = c.query.Stop(cleanupCtx)
 		return types.NewControlProtocolErrorWithCause("failed to initialize control protocol", err)
 	}
 	c.logger.Debug("Control protocol initialized")

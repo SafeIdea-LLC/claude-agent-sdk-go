@@ -152,8 +152,10 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 		// Stop and Close from draining goroutines and killing the subprocess.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_ = queryHandler.Stop(cleanupCtx)
+		// Close transport first — kills the subprocess, which unblocks the
+		// reader goroutine (stuck on stdout.Read). Then Stop drains goroutines.
 		_ = transportInst.Close(cleanupCtx)
+		_ = queryHandler.Stop(cleanupCtx)
 		return nil, types.NewControlProtocolErrorWithCause("initialization failed", err)
 	}
 
