@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/schlunsen/claude-agent-sdk-go/internal"
 	"github.com/schlunsen/claude-agent-sdk-go/internal/log"
@@ -146,8 +147,13 @@ func Query(ctx context.Context, prompt string, options *types.ClaudeAgentOptions
 	// servers — the messageLoop handles those concurrently.
 	if _, err := queryHandler.Initialize(ctx); err != nil {
 		logger.Error("Control protocol initialization failed: %v", err)
-		_ = queryHandler.Stop(ctx)
-		_ = transportInst.Close(ctx)
+		// Use a fresh context for cleanup — the original ctx may already be
+		// canceled/expired (e.g. deadline exceeded), which would prevent
+		// Stop and Close from draining goroutines and killing the subprocess.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = queryHandler.Stop(cleanupCtx)
+		_ = transportInst.Close(cleanupCtx)
 		return nil, types.NewControlProtocolErrorWithCause("initialization failed", err)
 	}
 

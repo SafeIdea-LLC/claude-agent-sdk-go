@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/schlunsen/claude-agent-sdk-go/internal"
 	"github.com/schlunsen/claude-agent-sdk-go/internal/log"
@@ -223,8 +224,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Initialize control protocol
 	if _, err := c.query.Initialize(ctx); err != nil {
 		c.logger.Error("Failed to initialize control protocol: %v", err)
-		_ = c.query.Stop(ctx)
-		_ = c.transport.Close(ctx)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = c.query.Stop(cleanupCtx)
+		_ = c.transport.Close(cleanupCtx)
 		return types.NewControlProtocolErrorWithCause("failed to initialize control protocol", err)
 	}
 	c.logger.Debug("Control protocol initialized")
